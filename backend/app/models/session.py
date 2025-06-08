@@ -40,7 +40,9 @@ class CounselingSession(Base):
     
     # リレーション
     user = relationship("User", back_populates="sessions")
-
+# レジディア分析とのリレーション
+    residia_analyses = relationship("ResidiaAnalysis", back_populates="session")
+    
 class IPMKnowledge(Base):
     """IPM知識データベーステーブル"""
     __tablename__ = "ipm_knowledge"
