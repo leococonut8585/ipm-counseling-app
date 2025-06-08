@@ -31,3 +31,8 @@ python-dateutil==2.8.2
 pytz==2023.3
 # Email validation
 email-validator==2.1.0
+# AI APIs
+anthropic==0.18.1  # 既に追加済み
+openai==1.10.0     # 既に追加済み
+google-generativeai==0.3.2  # 既に追加済み
+aiofiles==23.2.1   # 非同期ファイル処理用

@@ -12,6 +12,7 @@ from app.crud import session as crud_session
 from app.routers.auth import oauth2_scheme
 from app.security import decode_access_token
 from app.crud.user import get_user_by_email
+from app.ai_service import ai_service
 
 router = APIRouter(
     prefix="/sessions",
@@ -148,11 +149,10 @@ async def get_session(
 @router.put("/{session_id}/diagnosis", response_model=SessionResponse)
 async def update_diagnosis(
     session_id: int,
-    diagnosis: DiagnosisUpdate,
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """セッションの診断結果を更新"""
+    """セッションの診断結果を自動生成して更新"""
     # セッションの所有者確認
     session = crud_session.get_session(db, session_id)
     if not session or session.user_id != current_user.id:
@@ -161,16 +161,31 @@ async def update_diagnosis(
             detail="セッションが見つかりません"
         )
     
-    updated_session = crud_session.update_session_diagnosis(
-        db=db,
-        session_id=session_id,
-        physical_diagnosis=diagnosis.physical_diagnosis,
-        emotional_diagnosis=diagnosis.emotional_diagnosis,
-        unconscious_diagnosis=diagnosis.unconscious_diagnosis,
-        counseling_response=diagnosis.counseling_response
-    )
-    
-    return updated_session
+    try:
+        # AIを使ってIPM診断を生成
+        diagnosis_result = await ai_service.generate_ipm_diagnosis(
+            initial_prompt=session.initial_prompt,
+            ai_model="claude"  # Claudeを優先使用
+        )
+        
+        # セッションの診断結果を更新
+        updated_session = crud_session.update_session_diagnosis(
+            db=db,
+            session_id=session_id,
+            physical_diagnosis=diagnosis_result.get("physical", ""),
+            emotional_diagnosis=diagnosis_result.get("emotional", ""),
+            unconscious_diagnosis=diagnosis_result.get("unconscious", ""),
+            counseling_response=diagnosis_result.get("counseling", "")
+        )
+        
+        return updated_session
+        
+    except Exception as e:
+        logger.error(f"AI診断生成エラー: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="診断の生成中にエラーが発生しました"
+        )
 
 @router.post("/{session_id}/questions", response_model=SessionResponse)
 async def add_question_answer(

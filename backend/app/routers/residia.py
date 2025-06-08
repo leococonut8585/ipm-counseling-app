@@ -14,6 +14,10 @@ from app.crud import user as crud_user
 from app.routers.auth import oauth2_scheme
 from app.security import decode_access_token
 from app.file_manager import get_file_content_for_ai
+from app.ai_service import ai_service
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/residia",
@@ -131,32 +135,37 @@ async def generate_residia_questions(
             detail="この機能はアドバンスプラン以上で利用可能です"
         )
     
-    # TODO: AIを使って質問を生成
-    # ここでは仮の質問を返す
-    questions = [
-        ResidiaQuestion(
-            question="幼少期に最も強く記憶に残っている出来事は何ですか？",
-            question_type="initial"
-        ),
-        ResidiaQuestion(
-            question="両親や養育者との関係で、今でも心に残っている言葉はありますか？",
-            question_type="initial"
-        ),
-        ResidiaQuestion(
-            question="子供の頃、自分の感情を素直に表現できましたか？できなかった場合、その理由は？",
-            question_type="initial"
-        ),
-        ResidiaQuestion(
-            question="過去の経験で、今の自分の行動パターンに影響を与えていると感じるものはありますか？",
-            question_type="initial"
-        ),
-        ResidiaQuestion(
-            question="信頼していた人に裏切られたと感じた経験はありますか？",
-            question_type="initial"
+    try:
+        # セッションデータを準備
+        session_data = {
+            "initial_prompt": session.initial_prompt,
+            "physical_diagnosis": session.physical_diagnosis,
+            "emotional_diagnosis": session.emotional_diagnosis,
+            "unconscious_diagnosis": session.unconscious_diagnosis
+        }
+        
+        # AIを使って質問を生成
+        questions_text = await ai_service.generate_residia_questions(
+            session_data=session_data,
+            ai_model="claude"
         )
-    ]
-    
-    return questions
+        
+        # 質問をResidiaQuestionモデルに変換
+        questions = []
+        for i, q in enumerate(questions_text):
+            questions.append(ResidiaQuestion(
+                question=q,
+                question_type="initial" if i < 3 else "follow_up"
+            ))
+        
+        return questions
+        
+    except Exception as e:
+        logger.error(f"質問生成エラー: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="質問の生成中にエラーが発生しました"
+        )
 
 @router.post("/analyze", response_model=ResidiaAnalysisResponse)
 async def analyze_residia(
@@ -221,22 +230,57 @@ async def analyze_residia(
     secondary = type_scores[1] if len(type_scores) > 1 else None
     tertiary = type_scores[2] if len(type_scores) > 2 else None
     
-    # TODO: AIを使って3000-6000字の回答を生成
-    # ここでは仮の回答を生成
-    ai_response = f"""
-あなたの回答から、{primary[0].name}のレジディアが最も強く影響していることがわかりました。
+# タイプ名のリストを作成
+    identified_types = []
+    if primary:
+        identified_types.append(primary[0].name)
+    if secondary:
+        identified_types.append(secondary[0].name)
+    if tertiary:
+        identified_types.append(tertiary[0].name)
+    
+    try:
+        # AIを使って3000-6000字の回答を生成
+        ai_response = await ai_service.analyze_residia(
+            session_data=session_data,
+            user_answers=answers,
+            identified_types=identified_types,
+            ai_model="claude"
+        )
+        
+        # 文字数確認（シニョーレのご要望通り）
+        response_length = len(ai_response)
+        if response_length < 3000:
+            logger.warning(f"レジディア分析の回答が短すぎます: {response_length}字")
+            # 短い場合は再生成を試みる
+            ai_response = await ai_service.analyze_residia(
+                session_data=session_data,
+                user_answers=answers,
+                identified_types=identified_types,
+                ai_model="claude"
+            )
+        elif response_length > 6000:
+            logger.warning(f"レジディア分析の回答が長すぎます: {response_length}字")
+            # 長すぎる場合は6000字でカット
+            ai_response = ai_response[:6000]
+        
+        logger.info(f"レジディア分析回答生成完了: {len(ai_response)}字")
+        
+    except Exception as e:
+        logger.error(f"レジディア分析生成エラー: {e}")
+        # エラー時のフォールバック
+        ai_response = f"""
+申し訳ございません。分析の生成中にエラーが発生しました。
 
-{primary[0].name}のレジディアは、{primary[0].description}
+判定されたレジディアタイプ：
+- {identified_types[0] if len(identified_types) > 0 else "不明"}
+- {identified_types[1] if len(identified_types) > 1 else "なし"}
+- {identified_types[2] if len(identified_types) > 2 else "なし"}
 
-このタイプの特徴として...
+詳細な分析は現在生成できませんが、これらのタイプがあなたの幼少期の経験と
+現在の状態に関連していることは間違いありません。
 
-（実際の実装では、ここでAIがファイルを参照して3000-6000字の詳細な分析を生成します）
-
-あなたの幼少期の経験は、現在のあなたの行動パターンや感情反応に深く影響を与えています。
-しかし、それは決してあなたの価値を損なうものではありません。
-むしろ、その経験があったからこそ、今のあなたの強さと優しさがあるのです。
-
-これからの人生において、このレジディアとどのように向き合っていくか...
+システムが復旧次第、より詳細な分析をご提供いたします。
 """
     
     # 分析結果を保存
