@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
-from app.routers import auth, sessions
+from app.routers import auth, sessions, residia
 
 # 環境変数の読み込み
 load_dotenv()
@@ -46,6 +46,7 @@ async def health_check():
         "timestamp": "2024-12-18"
     }
 
-# ルーターの登録
+
 app.include_router(auth.router)
 app.include_router(sessions.router)
+app.include_router(residia.router)
