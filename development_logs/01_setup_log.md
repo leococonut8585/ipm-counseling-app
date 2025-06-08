@@ -23,3 +23,11 @@ git commit -m "Initial commit: プロジェクト構造の作成"
 git remote add origin [リポジトリURL]
 git branch -M main
 git push -u origin main
+
+### ファイル構造の修正（2024年12月18日）
+- 誤って`backend/app/`に作成された.envファイルを`backend/`直下に移動
+- プロジェクトルートの不要なrequirements.txtを削除
+- 正しい場所にファイルを配置：
+  - backend/.env（Gitには追加しない）
+  - backend/.env.example（テンプレートとして共有）
+  - backend/requirements.txt（依存関係リスト）
