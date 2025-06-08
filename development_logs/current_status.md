@@ -1,33 +1,39 @@
 # 現在の開発状態
 
-最終更新日時：2024年XX月XX日 XX:XX
+最終更新日時：2024年12月18日 16:30
 
 ## 現在作業中のタスク
 - [x] 開発カルテシステムの作成
-- [x] Python仮想環境のセットアップ
-- [ ] FastAPIの基本構造作成
+- [x] Python仮想環境のセットアップ（venv_new使用）
+- [x] FastAPIの基本構造作成
+- [x] データベース接続設定
+- [ ] CRUD操作の実装 ← 次はここ！
 
 ## 直前に完了したこと
-- [x] Python仮想環境（venv）の作成
-- [x] 必要なパッケージのインストール
-- [x] requirements.txtの作成
-- [x] .envファイルの準備
+- [x] SQLAlchemyでのDB接続設定
+- [x] 3つのモデル定義（User, CounselingSession, IPMKnowledge）
+- [x] データベース初期化成功（ipm_counseling.db作成）
+- [x] __pycache__問題の解決とGitへのクリーンなコミット
 
 ## 次にやるべきこと
-1. 
-2. 
-3. 
+1. ユーザー登録APIの実装
+2. ログインAPIの実装（JWT認証）
+3. セッション作成・取得APIの実装
 
 ## 重要な決定事項
-- 
+- 開発環境ではSQLiteを使用（本番ではPostgreSQL予定）
+- 認証にはJWT（JSON Web Token）を使用
+- プラン種別：basic, advance, maestro
 
 ## 現在の課題・質問
-- 
+- 特になし（順調に進行中）
 
 ## 使用中の技術仕様
-- Python: 3.11
+- OS: Windows 11
+- Python: 3.11（venv_new環境）
 - Framework: FastAPI
-- Frontend: Jules + Stitch
+- Database: SQLite（開発）/ PostgreSQL（本番予定）
+- Frontend: Jules + Stitch（未実装）
 - APIs: Perplexity, Elevenlabs, Gemini, Claude等
 
 # セットアップログ
