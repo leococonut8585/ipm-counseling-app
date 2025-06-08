@@ -2,10 +2,9 @@
 ユーザーモデルの定義
 """
 from sqlalchemy import Column, Integer, String, DateTime, Boolean
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
 from datetime import datetime
-
-Base = declarative_base()
+from app.database import Base  # ← ここを変更！
 
 class User(Base):
     """ユーザーテーブルの定義"""
@@ -18,3 +17,6 @@ class User(Base):
     plan_type = Column(String, default="basic")  # basic, advance, maestro
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # リレーション
+    sessions = relationship("CounselingSession", back_populates="user")
