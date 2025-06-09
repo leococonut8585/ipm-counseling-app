@@ -9,6 +9,7 @@ import asyncio
 import anthropic
 import openai
 from google import generativeai as genai
+from google.api_core import exceptions as google_exceptions
 import logging
 from app.file_manager import get_file_content_for_ai
 
@@ -304,6 +305,202 @@ async def _generate_with_claude(self, system_prompt: str, user_prompt: str) -> D
             
         except Exception as e:
             logger.error(f"Claude APIレジディア分析エラー: {e}")
+            raise
+
+    async def _generate_with_openai(self, system_prompt: str, user_prompt: str) -> Dict[str, str]:
+        """OpenAI APIでIPM診断を生成"""
+        # APIキーの取得
+        api_key = os.getenv("OPENAI_API_KEY")
+
+        # ダミーキーチェック
+        if not api_key or "dummy" in api_key:
+            logger.info("OpenAI APIキーがダミーまたは未設定のため、モック応答を返します。")
+            return {
+                "physical": "OpenAI Physical mock response.",
+                "emotional": "OpenAI Emotional mock response.",
+                "unconscious": "OpenAI Unconscious mock response.",
+                "counseling": "OpenAI Counseling mock response."
+            }
+
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.openai_client.chat.completions.create,
+                    model="gpt-4",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                ),
+                timeout=AI_TIMEOUT
+            )
+
+            content = response.choices[0].message.content
+
+            result = {
+                "physical": "",
+                "emotional": "",
+                "unconscious": "",
+                "counseling": ""
+            }
+
+            sections = content.split('\n\n')
+            current_section = None
+
+            for section_text in sections:
+                # strip section_text to avoid issues with leading/trailing spaces
+                stripped_section_text = section_text.strip()
+                if '肉体的な要因' in stripped_section_text or '肉体的要因' in stripped_section_text:
+                    current_section = 'physical'
+                elif '感情的な要因' in stripped_section_text or '感情的要因' in stripped_section_text:
+                    current_section = 'emotional'
+                elif '無意識の要因' in stripped_section_text or '無意識的要因' in stripped_section_text:
+                    current_section = 'unconscious'
+                elif '総合的なカウンセリング' in stripped_section_text or 'カウンセリング' in stripped_section_text:
+                    current_section = 'counseling'
+
+                if current_section:
+                    # Add text to the current section, ensuring not to add the title itself again
+                    # if title is at the start of section_text
+                    text_to_add = stripped_section_text
+                    if stripped_section_text.startswith('1. 肉体的な要因') or \
+                       stripped_section_text.startswith('2. 感情的な要因') or \
+                       stripped_section_text.startswith('3. 無意識の要因') or \
+                       stripped_section_text.startswith('4. 総合的なカウンセリング'):
+                        # Heuristic to remove title part if it's structured like "1. Title text"
+                        parts = stripped_section_text.split('\n', 1)
+                        if len(parts) > 1:
+                             text_to_add = parts[1] # Take the text after the first line
+                        else:
+                             # if no newline, it might be just title, or title + content in one line
+                             # try to remove common titles
+                             for title_keyword in ['肉体的な要因', '感情的な要因', '無意識の要因', '総合的なカウンセリング',
+                                                 '肉体的要因', '感情的要因', '無意識的要因', 'カウンセリング',
+                                                 '1.', '2.', '3.', '4.']:
+                                text_to_add = text_to_add.replace(title_keyword, '').strip()
+
+                    if result[current_section]: # if already has content, add a newline
+                         result[current_section] += '\n' + text_to_add
+                    else:
+                         result[current_section] = text_to_add
+                elif current_section is None and stripped_section_text: # Text before any known section
+                    # This case might happen if the response doesn't strictly follow the section headers
+                    # For now, we'll ignore text that doesn't fall into a known section
+                    pass
+
+            # 各セクションのテキストをクリーンアップ
+            for key in result:
+                result[key] = result[key].strip()
+                # Additional cleanup for titles that might have been missed or part of the content
+                for title in ['肉体的な要因:', '感情的な要因:', '無意識の要因:', '総合的なカウンセリング:',
+                              '肉体的な要因', '感情的な要因', '無意識の要因', '総合的なカウンセリング',
+                              '肉体的要因', '感情的要因', '無意識的要因',
+                              '1.', '2.', '3.', '4.']:
+                    # Ensure replacement is only for leading part if possible or be careful
+                    if result[key].startswith(title):
+                        result[key] = result[key][len(title):].strip()
+
+            return result
+
+        except asyncio.TimeoutError:
+            logger.error("OpenAI APIがタイムアウトしました")
+            raise
+        except openai.APIError as e: # More specific OpenAI errors can be caught here if needed
+            logger.error(f"OpenAI APIエラー: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"OpenAI API一般エラー: {e}")
+            raise
+
+    async def _generate_with_gemini(self, system_prompt: str, user_prompt: str) -> Dict[str, str]:
+        """Gemini APIでIPM診断を生成"""
+        api_key = os.getenv("GOOGLE_API_KEY")
+
+        if self.gemini_model is None or not api_key or "dummy" in api_key:
+            logger.info("Gemini APIクライアントが未初期化またはAPIキーがダミーまたは未設定のため、モック応答を返します。")
+            return {
+                "physical": "Gemini Physical mock response.",
+                "emotional": "Gemini Emotional mock response.",
+                "unconscious": "Gemini Unconscious mock response.",
+                "counseling": "Gemini Counseling mock response."
+            }
+
+        try:
+            # Geminiはシステムプロンプトを直接サポートしないため、ユーザープロンプトに統合
+            # または、MultiTurnPlaygroundのように roles を使った会話形式も可能だが、
+            # generate_content_async はシンプルな文字列入力を受け付ける
+            combined_prompt = f"{system_prompt}\n\n{user_prompt}"
+
+            response = await asyncio.wait_for(
+                self.gemini_model.generate_content_async(combined_prompt),
+                timeout=AI_TIMEOUT
+            )
+
+            content = response.text
+
+            result = {
+                "physical": "",
+                "emotional": "",
+                "unconscious": "",
+                "counseling": ""
+            }
+
+            sections = content.split('\n\n')
+            current_section = None
+
+            for section_text in sections:
+                stripped_section_text = section_text.strip()
+                if '肉体的な要因' in stripped_section_text or '肉体的要因' in stripped_section_text:
+                    current_section = 'physical'
+                elif '感情的な要因' in stripped_section_text or '感情的要因' in stripped_section_text:
+                    current_section = 'emotional'
+                elif '無意識の要因' in stripped_section_text or '無意識的要因' in stripped_section_text:
+                    current_section = 'unconscious'
+                elif '総合的なカウンセリング' in stripped_section_text or 'カウンセリング' in stripped_section_text:
+                    current_section = 'counseling'
+
+                if current_section:
+                    text_to_add = stripped_section_text
+                    # Similar title removal logic as in _generate_with_openai
+                    if stripped_section_text.startswith('1. 肉体的な要因') or \
+                       stripped_section_text.startswith('2. 感情的な要因') or \
+                       stripped_section_text.startswith('3. 無意識の要因') or \
+                       stripped_section_text.startswith('4. 総合的なカウンセリング'):
+                        parts = stripped_section_text.split('\n', 1)
+                        if len(parts) > 1:
+                             text_to_add = parts[1]
+                        else:
+                             for title_keyword in ['肉体的な要因', '感情的な要因', '無意識の要因', '総合的なカウンセリング',
+                                                 '肉体的要因', '感情的要因', '無意識的要因', 'カウンセリング',
+                                                 '1.', '2.', '3.', '4.']:
+                                text_to_add = text_to_add.replace(title_keyword, '').strip()
+
+                    if result[current_section]:
+                         result[current_section] += '\n' + text_to_add
+                    else:
+                         result[current_section] = text_to_add
+                elif current_section is None and stripped_section_text:
+                    pass # Ignore text not falling into a known section
+
+            for key in result:
+                result[key] = result[key].strip()
+                for title in ['肉体的な要因:', '感情的な要因:', '無意識の要因:', '総合的なカウンセリング:',
+                              '肉体的な要因', '感情的な要因', '無意識の要因', '総合的なカウンセリング',
+                              '肉体的要因', '感情的要因', '無意識的要因',
+                              '1.', '2.', '3.', '4.']:
+                    if result[key].startswith(title):
+                        result[key] = result[key][len(title):].strip()
+
+            return result
+
+        except asyncio.TimeoutError:
+            logger.error("Gemini APIがタイムアウトしました")
+            raise
+        except google_exceptions.GoogleAPIError as e:
+            logger.error(f"Gemini APIエラー: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Gemini API一般エラー: {e}")
             raise
     
     # OpenAIとGeminiの実装は省略（基本的に同じ構造）
