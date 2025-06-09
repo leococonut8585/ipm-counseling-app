@@ -261,12 +261,10 @@ class AIService:
         if not self.claude_client:
             logger.warning("Claude client not available. Returning mock response.")
             mock_type = "ipm" if is_ipm else "residia_questions"
-            # Ensure the mock response matches the expected type for the call
             if is_ipm:
                  return self._create_mock_response("Claude", "ipm") # type: ignore
-            else: # residia_questions
+            else:
                  return self._create_mock_response("Claude", "residia_questions") # type: ignore
-
 
         try:
             logger.info("Calling Claude API")
@@ -344,9 +342,8 @@ class AIService:
             mock_type = "ipm" if is_ipm else "residia_questions"
             if is_ipm:
                  return self._create_mock_response("OpenAI", "ipm") # type: ignore
-            else: # residia_questions
+            else:
                  return self._create_mock_response("OpenAI", "residia_questions") # type: ignore
-
 
         try:
             logger.info("Calling OpenAI API")
@@ -394,7 +391,7 @@ class AIService:
             mock_type = "ipm" if is_ipm else "residia_questions"
             if is_ipm:
                  return self._create_mock_response("Gemini", "ipm") # type: ignore
-            else: # residia_questions
+            else:
                  return self._create_mock_response("Gemini", "residia_questions") # type: ignore
 
         try:
@@ -436,7 +433,6 @@ class AIService:
             raise
 
     async def _fallback_to_available_ai(self, system_prompt: str, user_prompt: str, is_ipm: bool, preferred_order: List[str]) -> Dict[str, str] | List[str]:
-        # This method is kept for now but might be deprecated if the new generate_... methods' logic is preferred.
         logger.info(f"Attempting fallback for {'IPM' if is_ipm else 'Residia questions'} with order: {preferred_order}")
         model_map = {
             "claude": (self._generate_with_claude, self.claude_client),
@@ -463,7 +459,6 @@ class AIService:
             return self._create_mock_response("EmergencyFallbackInMethod", "ipm") # type: ignore
         else:
             return self._create_mock_response("EmergencyFallbackInMethod", "residia_questions") # type: ignore
-
 
     def _validate_ipm_response(self, response: Optional[Dict[str, str]]) -> bool:
         if not response:
@@ -595,7 +590,7 @@ class AIService:
                     if not last_error: last_error = Exception(f"Client for {model_name_in_order} not available.")
                     continue
 
-                if questions and len(questions) >= 3: # Basic validation for questions
+                if questions and len(questions) >= 3:
                     logger.info(f"Residia questions successful with {model_name_in_order} (Count: {len(questions)}).")
                     return questions[:5]
                 else:
@@ -606,8 +601,7 @@ class AIService:
                 last_error = e
 
         logger.error(f"All AI models for Residia questions failed. Last error: {last_error}. Order: {current_fallback_order}")
-        # Fallback to mock as per original generate_residia_questions if all else fails
-        if self._create_mock_response: # Check if method exists, defensive
+        if self._create_mock_response:
              return self._create_mock_response("CriticalFallbackMock", "residia_questions") # type: ignore
         raise last_error if isinstance(last_error, Exception) else Exception("Residia questions failed.")
 
@@ -620,7 +614,7 @@ class AIService:
         ai_model: Optional[str] = None,
         plan_type: Optional[str] = None
     ) -> str:
-        from app.config import DEFAULT_FALLBACK_ORDER # Import for explicit ai_model case
+        from app.config import DEFAULT_FALLBACK_ORDER
         logger.info(f"analyze_residia called. Plan: {plan_type}, Explicit AI: {ai_model}")
 
         primary_model_to_use: Optional[str] = None
@@ -639,32 +633,18 @@ class AIService:
             primary_model_to_use = _primary
             current_fallback_order = _fallback_order
         else:
-            # Defaulting to a standard fallback if no plan or model specified, though router should provide plan.
             logger.warning("Neither plan_type nor ai_model specified for analyze_residia. Using default fallback.")
             primary_model_to_use = DEFAULT_FALLBACK_ORDER[0]
             current_fallback_order = DEFAULT_FALLBACK_ORDER
-            # Alternatively, raise ValueError("Either ai_model or plan_type must be provided for Residia analysis.")
 
         logger.info(f"Residia Analysis - Primary: {primary_model_to_use}, Order: {current_fallback_order}")
 
-        # This method's core logic is largely a placeholder.
-        # The AI call part would be similar to other generate_ methods if it were generating complex text.
-        # For now, it just returns a mock string. We'll include the chosen model in the mock.
-
-        # Placeholder for creating system/user prompts for residia analysis
         _system_prompt = f"Analyze Residia for types: {', '.join(identified_types)} based on provided data. Use {primary_model_to_use} logic."
         _user_prompt = f"Session: {session_data.get('initial_prompt', '')}. Answers: {user_answers}. Analyze."
-
-        # Mocked AI call attempt - in a real scenario, this would loop through current_fallback_order
         chosen_model_for_mock = primary_model_to_use or current_fallback_order[0]
 
         logger.warning(f"analyze_residia is using mock logic. Chosen AI for mock: {chosen_model_for_mock}")
-        # Simulating that it would try chosen_model_for_mock
-        # In a full implementation, you'd loop through `current_fallback_order` and call appropriate
-        # _generate_with_X method, which would then need a new `is_ipm` type or a dedicated method.
-        # For example, `await self._generate_residia_analysis_content(system_prompt, user_prompt, model_to_use)`
 
         return f"Mock analysis for plan '{plan_type}' (tried {chosen_model_for_mock} first based on logic) for types: {', '.join(identified_types)}. User prompt: {session_data.get('initial_prompt', '')}. This function's core generation logic needs full implementation."
 
 ai_service = AIService()
-```
