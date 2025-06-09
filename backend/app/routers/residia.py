@@ -1,7 +1,7 @@
 """
 レジディア分析関連のルーター
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Request # Added Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict
@@ -113,12 +113,11 @@ async def generate_residia_questions_endpoint(
 
 @router.post("/analyze", response_model=ResidiaAnalysisResponse)
 async def analyze_residia_endpoint(
-    fastapi_request: Request, # MODIFIED: Added fastapi.Request
-    request: ResidiaAnalysisRequest, # Pydantic model for validated data
+    fastapi_request: Request,
+    request: ResidiaAnalysisRequest,
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # MODIFIED: Added debug logging
     try:
         body = await fastapi_request.body()
         logger.info(f"Raw request body for /residia/analyze: {body.decode('utf-8', errors='ignore')}")
