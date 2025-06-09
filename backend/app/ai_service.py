@@ -657,4 +657,4 @@ class AIService:
 # Depending on application structure (e.g., FastAPI), dependency injection might be used instead.
 # For now, as per original structure, a direct instance can be created if needed elsewhere.
 # However, it's often better to instantiate it where used or use a factory/DI.
-# ai_service = AIService()
+ai_service = AIService()
