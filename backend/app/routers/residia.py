@@ -10,10 +10,10 @@ from datetime import datetime
 from app.database import get_db
 from app.crud import residia as crud_residia
 from app.crud import session as crud_session
-from app.crud import user as crud_user
-from app.routers.auth import oauth2_scheme
-from app.security import decode_access_token
-from app.file_manager import get_file_content_for_ai
+from app.crud import user as crud_user # Ensure crud_user is imported for get_current_user
+from app.routers.auth import oauth2_scheme # Ensure oauth2_scheme is imported for get_current_user
+from app.security import decode_access_token # Ensure decode_access_token is imported for get_current_user
+# from app.file_manager import get_file_content_for_ai # This import seems unused here
 from app.ai_service import ai_service
 import logging
 
@@ -59,18 +59,16 @@ class ResidiaAnalysisResponse(BaseModel):
     tertiary_type: Optional[ResidiaTypeInfo]
     ai_response: str
     analysis_count: int
-    can_continue: bool  # さらに分析を続けられるか
+    can_continue: bool
     created_at: datetime
     
     class Config:
         from_attributes = True
 
-# 現在のユーザーを取得する依存関数
-async def get_current_user(
+async def get_current_user( # Copied from sessions.py for consistency if not already shared
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
-    """トークンから現在のユーザーを取得"""
     payload = decode_access_token(token)
     if payload is None:
         raise HTTPException(
@@ -78,7 +76,6 @@ async def get_current_user(
             detail="認証情報が無効です",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
     email: str = payload.get("sub")
     if email is None:
         raise HTTPException(
@@ -86,14 +83,12 @@ async def get_current_user(
             detail="認証情報が無効です",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
     user = crud_user.get_user_by_email(db, email=email)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="ユーザーが見つかりません"
         )
-    
     return user
 
 @router.get("/types", response_model=List[ResidiaTypeInfo])
@@ -108,19 +103,18 @@ async def get_residia_types(
             id=t.id,
             name=t.name,
             description=t.description or "",
-            score=0.0  # スコアは分析時に計算
+            score=0.0
         )
         for t in types
     ]
 
 @router.post("/generate-questions", response_model=List[ResidiaQuestion])
-async def generate_residia_questions(
+async def generate_residia_questions_endpoint( # Renamed to avoid conflict with imported generate_residia_questions
     session_id: int,
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """レジディア分析用の質問を生成"""
-    # セッションの所有者確認
     session = crud_session.get_session(db, session_id)
     if not session or session.user_id != current_user.id:
         raise HTTPException(
@@ -128,15 +122,17 @@ async def generate_residia_questions(
             detail="セッションが見つかりません"
         )
     
-    # プランチェック（アドバンス以上）
-    if current_user.plan_type == "basic":
+    user_plan_type = getattr(current_user, 'plan_type', 'basic')
+    if not hasattr(current_user, 'plan_type'):
+        logger.warning(f"User ID {current_user.id} does not have 'plan_type' attribute for residia questions. Defaulting to 'basic'.")
+
+    if user_plan_type == "basic": # Plan check as per original logic
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="この機能はアドバンスプラン以上で利用可能です"
         )
     
     try:
-        # セッションデータを準備
         session_data = {
             "initial_prompt": session.initial_prompt,
             "physical_diagnosis": session.physical_diagnosis,
@@ -144,13 +140,11 @@ async def generate_residia_questions(
             "unconscious_diagnosis": session.unconscious_diagnosis
         }
         
-        # AIを使って質問を生成
         questions_text = await ai_service.generate_residia_questions(
             session_data=session_data,
-            ai_model="claude"
+            plan_type=user_plan_type # MODIFIED
         )
         
-        # 質問をResidiaQuestionモデルに変換
         questions = []
         for i, q in enumerate(questions_text):
             questions.append(ResidiaQuestion(
@@ -161,20 +155,19 @@ async def generate_residia_questions(
         return questions
         
     except Exception as e:
-        logger.error(f"質問生成エラー: {e}")
+        logger.error(f"質問生成エラー for session {session_id}, plan {user_plan_type}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="質問の生成中にエラーが発生しました"
         )
 
 @router.post("/analyze", response_model=ResidiaAnalysisResponse)
-async def analyze_residia(
+async def analyze_residia_endpoint( # Renamed to avoid conflict
     request: ResidiaAnalysisRequest,
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """レジディア分析を実行"""
-    # セッションの所有者確認
     session = crud_session.get_session(db, request.session_id)
     if not session or session.user_id != current_user.id:
         raise HTTPException(
@@ -182,42 +175,36 @@ async def analyze_residia(
             detail="セッションが見つかりません"
         )
     
-    # プランチェック
-    if current_user.plan_type == "basic":
+    user_plan_type = getattr(current_user, 'plan_type', 'basic')
+    if not hasattr(current_user, 'plan_type'):
+        logger.warning(f"User ID {current_user.id} does not have 'plan_type' attribute for residia analysis. Defaulting to 'basic'.")
+
+    if user_plan_type == "basic": # Plan check
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="この機能はアドバンスプラン以上で利用可能です"
         )
     
-    # 既存の分析を確認
     existing_analysis = crud_residia.get_residia_analysis_by_session(
         db, request.session_id
     )
     
-    # 分析回数制限チェック
     if existing_analysis:
-        max_count = 1 if current_user.plan_type == "advance" else 3
+        max_count = 1 if user_plan_type == "advance" else 3
         if existing_analysis.analysis_count >= max_count:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"分析回数の上限（{max_count}回）に達しています"
             )
     
-    # セッションデータを準備
     session_data = {
         "initial_prompt": session.initial_prompt,
         "physical_diagnosis": session.physical_diagnosis,
         "emotional_diagnosis": session.emotional_diagnosis,
         "unconscious_diagnosis": session.unconscious_diagnosis
     }
-    
-    # 回答データを準備
     answers = [{"question": a.question, "answer": a.answer} for a in request.answers]
-    
-    # レジディアタイプのスコアを計算
-    type_scores = crud_residia.calculate_residia_scores(
-        db, session_data, answers
-    )
+    type_scores = crud_residia.calculate_residia_scores(db, session_data, answers)
     
     if not type_scores:
         raise HTTPException(
@@ -225,118 +212,68 @@ async def analyze_residia(
             detail="レジディアタイプを判定できませんでした"
         )
     
-    # 最大3つのタイプを取得
     primary = type_scores[0] if len(type_scores) > 0 else None
     secondary = type_scores[1] if len(type_scores) > 1 else None
     tertiary = type_scores[2] if len(type_scores) > 2 else None
     
-# タイプ名のリストを作成
     identified_types = []
-    if primary:
-        identified_types.append(primary[0].name)
-    if secondary:
-        identified_types.append(secondary[0].name)
-    if tertiary:
-        identified_types.append(tertiary[0].name)
+    if primary: identified_types.append(primary[0].name)
+    if secondary: identified_types.append(secondary[0].name)
+    if tertiary: identified_types.append(tertiary[0].name)
     
     try:
-        # AIを使って3000-6000字の回答を生成
         ai_response = await ai_service.analyze_residia(
             session_data=session_data,
             user_answers=answers,
             identified_types=identified_types,
-            ai_model="claude"
+            plan_type=user_plan_type # MODIFIED
         )
         
-        # 文字数確認（シニョーレのご要望通り）
         response_length = len(ai_response)
-        if response_length < 3000:
-            logger.warning(f"レジディア分析の回答が短すぎます: {response_length}字")
-            # 短い場合は再生成を試みる
-            ai_response = await ai_service.analyze_residia(
+        if response_length < 3000: # Specified length check
+            logger.warning(f"レジディア分析の回答が短すぎます: {response_length}字 for session {request.session_id}, plan {user_plan_type}. Retrying.")
+            ai_response = await ai_service.analyze_residia( # Retry
                 session_data=session_data,
                 user_answers=answers,
                 identified_types=identified_types,
-                ai_model="claude"
+                plan_type=user_plan_type # MODIFIED
             )
-        elif response_length > 6000:
-            logger.warning(f"レジディア分析の回答が長すぎます: {response_length}字")
-            # 長すぎる場合は6000字でカット
+            logger.info(f"Residia analysis retry response length: {len(ai_response)}")
+        elif response_length > 6000: # Specified length check
+            logger.warning(f"レジディア分析の回答が長すぎます: {response_length}字. Truncating to 6000.")
             ai_response = ai_response[:6000]
         
-        logger.info(f"レジディア分析回答生成完了: {len(ai_response)}字")
+        logger.info(f"レジディア分析回答生成完了: {len(ai_response)}字 for session {request.session_id}, plan {user_plan_type}")
         
     except Exception as e:
-        logger.error(f"レジディア分析生成エラー: {e}")
-        # エラー時のフォールバック
-        ai_response = f"""
-申し訳ございません。分析の生成中にエラーが発生しました。
+        logger.error(f"レジディア分析生成エラー for session {request.session_id}, plan {user_plan_type}: {e}", exc_info=True)
+        ai_response = f"申し訳ございません。分析の生成中にエラーが発生しました。判定されたレジディアタイプ：{', '.join(identified_types) if identified_types else '不明'}。詳細はシステム管理者にお問い合わせください。"
 
-判定されたレジディアタイプ：
-- {identified_types[0] if len(identified_types) > 0 else "不明"}
-- {identified_types[1] if len(identified_types) > 1 else "なし"}
-- {identified_types[2] if len(identified_types) > 2 else "なし"}
-
-詳細な分析は現在生成できませんが、これらのタイプがあなたの幼少期の経験と
-現在の状態に関連していることは間違いありません。
-
-システムが復旧次第、より詳細な分析をご提供いたします。
-"""
-    
-    # 分析結果を保存
     if existing_analysis:
-        # 既存の分析を更新
-        analysis = crud_residia.update_residia_analysis(
-            db,
-            existing_analysis.id,
-            answers,
-            ai_response
-        )
+        analysis = crud_residia.update_residia_analysis(db, existing_analysis.id, answers, ai_response)
     else:
-        # 新規作成
         analysis = crud_residia.create_residia_analysis(
-            db,
-            session_id=request.session_id,
-            analysis_questions=answers,
-            primary_type_id=primary[0].id,
-            primary_score=primary[1],
-            secondary_type_id=secondary[0].id if secondary else None,
-            secondary_score=secondary[1] if secondary else None,
-            tertiary_type_id=tertiary[0].id if tertiary else None,
-            tertiary_score=tertiary[1] if tertiary else None,
+            db, session_id=request.session_id, analysis_questions=answers,
+            primary_type_id=primary[0].id if primary else None, primary_score=primary[1] if primary else 0.0,
+            secondary_type_id=secondary[0].id if secondary else None, secondary_score=secondary[1] if secondary else None,
+            tertiary_type_id=tertiary[0].id if tertiary else None, tertiary_score=tertiary[1] if tertiary else None,
             ai_response=ai_response
         )
     
-    # レスポンスを構築
-    max_count = 1 if current_user.plan_type == "advance" else 3
+    max_analysis_count = 1 if user_plan_type == "advance" else 3
     
+    # Ensure primary type exists for response construction
+    if not primary: # Should not happen if type_scores check passed, but defensive
+        raise HTTPException(status_code=500, detail="Primary residia type could not be determined for response.")
+
     response = ResidiaAnalysisResponse(
-        id=analysis.id,
-        session_id=analysis.session_id,
-        primary_type=ResidiaTypeInfo(
-            id=primary[0].id,
-            name=primary[0].name,
-            description=primary[0].description or "",
-            score=primary[1]
-        ),
-        secondary_type=ResidiaTypeInfo(
-            id=secondary[0].id,
-            name=secondary[0].name,
-            description=secondary[0].description or "",
-            score=secondary[1]
-        ) if secondary else None,
-        tertiary_type=ResidiaTypeInfo(
-            id=tertiary[0].id,
-            name=tertiary[0].name,
-            description=tertiary[0].description or "",
-            score=tertiary[1]
-        ) if tertiary else None,
-        ai_response=analysis.ai_response,
-        analysis_count=analysis.analysis_count,
-        can_continue=analysis.analysis_count < max_count,
-        created_at=analysis.created_at
+        id=analysis.id, session_id=analysis.session_id,
+        primary_type=ResidiaTypeInfo(id=primary[0].id, name=primary[0].name, description=primary[0].description or "", score=primary[1]),
+        secondary_type=ResidiaTypeInfo(id=secondary[0].id, name=secondary[0].name, description=secondary[0].description or "", score=secondary[1]) if secondary else None,
+        tertiary_type=ResidiaTypeInfo(id=tertiary[0].id, name=tertiary[0].name, description=tertiary[0].description or "", score=tertiary[1]) if tertiary else None,
+        ai_response=analysis.ai_response, analysis_count=analysis.analysis_count,
+        can_continue=analysis.analysis_count < max_analysis_count, created_at=analysis.created_at
     )
-    
     return response
 
 @router.get("/analysis/{session_id}", response_model=ResidiaAnalysisResponse)
@@ -346,49 +283,29 @@ async def get_residia_analysis(
     db: Session = Depends(get_db)
 ):
     """セッションのレジディア分析結果を取得"""
-    # セッションの所有者確認
     session = crud_session.get_session(db, session_id)
     if not session or session.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="セッションが見つかりません"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="セッションが見つかりません")
     
     analysis = crud_residia.get_residia_analysis_by_session(db, session_id)
     if not analysis:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="レジディア分析が見つかりません"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="レジディア分析が見つかりません")
     
-    # レスポンスを構築
-    max_count = 1 if current_user.plan_type == "advance" else 3
+    user_plan_type = getattr(current_user, 'plan_type', 'basic') # For can_continue logic
+    max_analysis_count = 1 if user_plan_type == "advance" else 3 # Align with creation logic
     
+    # Ensure related type objects are loaded if they are lazy. Accessing them directly.
+    # This assumes primary_type, secondary_type, tertiary_type are correctly populated objects by SQLAlchemy
+    if not analysis.primary_type:
+         raise HTTPException(status_code=500, detail="Primary residia type data missing in analysis record.")
+
+
     response = ResidiaAnalysisResponse(
-        id=analysis.id,
-        session_id=analysis.session_id,
-        primary_type=ResidiaTypeInfo(
-            id=analysis.primary_type.id,
-            name=analysis.primary_type.name,
-            description=analysis.primary_type.description or "",
-            score=analysis.primary_score
-        ),
-        secondary_type=ResidiaTypeInfo(
-            id=analysis.secondary_type.id,
-            name=analysis.secondary_type.name,
-            description=analysis.secondary_type.description or "",
-            score=analysis.secondary_score
-        ) if analysis.secondary_type else None,
-        tertiary_type=ResidiaTypeInfo(
-            id=analysis.tertiary_type.id,
-            name=analysis.tertiary_type.name,
-            description=analysis.tertiary_type.description or "",
-            score=analysis.tertiary_score
-        ) if analysis.tertiary_type else None,
-        ai_response=analysis.ai_response,
-        analysis_count=analysis.analysis_count,
-        can_continue=analysis.analysis_count < max_count,
-        created_at=analysis.created_at
+        id=analysis.id, session_id=analysis.session_id,
+        primary_type=ResidiaTypeInfo.from_attributes(analysis.primary_type),
+        secondary_type=ResidiaTypeInfo.from_attributes(analysis.secondary_type) if analysis.secondary_type else None,
+        tertiary_type=ResidiaTypeInfo.from_attributes(analysis.tertiary_type) if analysis.tertiary_type else None,
+        ai_response=analysis.ai_response, analysis_count=analysis.analysis_count,
+        can_continue=analysis.analysis_count < max_analysis_count, created_at=analysis.created_at
     )
-    
     return response

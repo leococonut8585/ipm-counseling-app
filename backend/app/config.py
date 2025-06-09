@@ -16,3 +16,22 @@ MAX_RESIDIA_RESPONSE_LENGTH = 6000
 
 # ログ設定
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# AI Model Configuration by Plan
+AI_MODEL_BY_PLAN = {
+    "basic": {
+        "primary": "gemini",
+        "fallback_order": ["gemini", "openai", "claude"]
+    },
+    "advance": {
+        "primary": "openai",
+        "fallback_order": ["openai", "gemini", "claude"]
+    },
+    "maestro": {
+        "primary": "claude",
+        "fallback_order": ["claude", "openai", "gemini"]
+    }
+}
+
+# デフォルトフォールバック（プランが不明な場合や明示指定時）
+DEFAULT_FALLBACK_ORDER = ["claude", "openai", "gemini"]
