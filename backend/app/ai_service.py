@@ -2,7 +2,7 @@ import os
 import re
 import asyncio
 import logging
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional, Literal # Ensure Optional is imported
 from dotenv import load_dotenv
 
 import anthropic
@@ -24,6 +24,18 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # AI Timeout
 AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", 300))  # Default to 300 seconds (5 minutes)
+
+# Custom Error
+class InsufficientPlanError(Exception):
+    """プランが不十分な場合のエラー"""
+    pass
+
+# Plan validation function
+def validate_plan_for_ai(plan_type: str, requested_ai: str) -> bool:
+    """プランが要求されたAIを使用可能か検証"""
+    if plan_type == "basic" and requested_ai == "claude":
+        return False
+    return True
 
 class ResponseParser:
     """AIレスポンスの統一パーサー"""
@@ -50,12 +62,11 @@ class ResponseParser:
             if match:
                 result[key] = match.group(1).strip()
             else:
-                # Fallback: try legacy method
                 logger.warning(f"Marker not found for {key} in IPM diagnosis. Attempting fallback.")
                 result[key] = ResponseParser._fallback_extract(content, key)
 
         filled_sections = sum(1 for v in result.values() if v)
-        if filled_sections < 2: # Expect at least 2 sections, ideally all 4
+        if filled_sections < 2:
             logger.warning(f"IPM diagnosis parsing result is insufficient. Filled sections: {filled_sections}")
             logger.debug(f"Raw content for IPM diagnosis (first 500 chars): {content[:500]}")
 
@@ -71,17 +82,12 @@ class ResponseParser:
             'counseling': ['総合的なカウンセリング', 'カウンセリング', '総合的', 'アドバイス', 'Counseling']
         }
 
-        # Try keyword-based extraction (simplified)
-        # This fallback is basic and might need more sophisticated logic depending on actual legacy formats
         for keyword in keywords.get(section_type, []):
-            # Attempt to find "Keyword:[ ]Content" or "Keyword\nContent"
-            # This regex is an example and may need refinement
             pattern = rf'{re.escape(keyword)}.*?(?:[:：]|\n)\s*(.*?)(?=\n\n|\n(?:###[A-Z_]+_START###|1\.|2\.|3\.|4\.)|$)'
             match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
             if match:
                 extracted_text = match.group(1).strip()
-                # Avoid re-extracting other sections' content if they accidentally match
-                if "###" not in extracted_text: # Simple check to avoid grabbing marked sections
+                if "###" not in extracted_text:
                     return extracted_text
 
         logger.debug(f"Fallback extraction failed for section: {section_type}")
@@ -92,34 +98,31 @@ class ResponseParser:
         """レジディア質問レスポンスをパース"""
         questions = []
 
-        for i in range(1, 6): # Q1 to Q5
+        for i in range(1, 6):
             pattern = rf'###Q{i}_START###\s*(.*?)\s*###Q{i}_END###'
             match = re.search(pattern, content, re.DOTALL)
             if match:
                 questions.append(match.group(1).strip())
 
-        if len(questions) < 3: # If not enough questions found with markers
+        if len(questions) < 3:
             logger.warning("Marker-based extraction for Residia questions yielded less than 3 questions. Attempting fallback.")
-            # Fallback: Numbered list or bullet points
-            # Regex looks for lines starting with a number/bullet, capturing the text after.
             fallback_pattern = r'(?:^|\n)\s*(?:(?:\d+\.?|\*|-)\s+)?(.*?)(?=\n\s*(?:(?:\d+\.?|\*|-)\s+)|$|###Q\d_START###)'
             fallback_matches = re.findall(fallback_pattern, content, re.MULTILINE)
 
             extracted_fallback_questions = []
             for match_text in fallback_matches:
                 cleaned_q = match_text.strip()
-                # Basic filter: not too short, not a marker itself
                 if cleaned_q and len(cleaned_q) > 10 and not cleaned_q.startswith("###") and not cleaned_q.endswith("###"):
                     extracted_fallback_questions.append(cleaned_q)
 
-            if questions: # If some questions were found by markers, append fallback ones if different
+            if questions:
                 for fq in extracted_fallback_questions:
                     if fq not in questions and len(questions) < 5:
                         questions.append(fq)
-            else: # No marker questions found, use fallback directly
+            else:
                  questions = extracted_fallback_questions
 
-        return questions[:5] # Max 5 questions
+        return questions[:5]
 
 class AIService:
     def __init__(self):
@@ -131,7 +134,7 @@ class AIService:
 
         self.openai_client = None
         if OPENAI_API_KEY and "dummy" not in OPENAI_API_KEY:
-            self.openai_client = openai.OpenAI(api_key=OPENAI_API_KEY) # Correct instantiation
+            self.openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
         else:
             logger.warning("OpenAI API key not available or is a dummy key.")
 
@@ -139,11 +142,29 @@ class AIService:
         if GOOGLE_API_KEY and "dummy" not in GOOGLE_API_KEY:
             try:
                 genai.configure(api_key=GOOGLE_API_KEY)
-                self.gemini_model = genai.GenerativeModel('gemini-1.5-flash') # Using a common model
+                self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
             except Exception as e:
                 logger.error(f"Failed to configure Gemini: {e}")
         else:
             logger.warning("Google API key not available or is a dummy key.")
+
+    def get_ai_models_for_plan(self, plan_type: str) -> tuple[str, list[str]]:
+        """
+        プランに基づくAIモデルとフォールバック順序を取得
+        """
+        from app.config import AI_MODEL_BY_PLAN, DEFAULT_FALLBACK_ORDER
+
+        if plan_type in AI_MODEL_BY_PLAN:
+            config = AI_MODEL_BY_PLAN[plan_type]
+            primary = config.get("primary")
+            order = config.get("fallback_order")
+            if not primary or not order:
+                logger.error(f"Plan configuration for '{plan_type}' is malformed. Using default fallback order.")
+                return DEFAULT_FALLBACK_ORDER[0], DEFAULT_FALLBACK_ORDER
+            return primary, order
+        else:
+            logger.warning(f"Unknown plan type: '{plan_type}', using default fallback order.")
+            return DEFAULT_FALLBACK_ORDER[0], DEFAULT_FALLBACK_ORDER
 
     def _create_ipm_diagnosis_prompt(self, initial_prompt: str) -> tuple[str, str]:
         system_prompt = """あなたはIPM（統合心身医学）の専門家です。
@@ -234,15 +255,18 @@ class AIService:
                 f"【{ai_type} Mock】###Q4_START###\n人間関係において、見捨てられることへの強い不安を感じたり、過度に相手に合わせようとしたりする傾向はありますか？\n###Q4_END###",
                 f"【{ai_type} Mock】###Q5_START###\n完璧主義的な傾向や、自分自身に厳しすぎる傾向はありますか？\n###Q5_END###",
             ]
-        return {} # Should not happen with current logic
-
+        return {}
 
     async def _generate_with_claude(self, system_prompt: str, user_prompt: str, is_ipm: bool) -> Dict[str, str] | List[str]:
         if not self.claude_client:
             logger.warning("Claude client not available. Returning mock response.")
-            # Ensure the type matches the expected return type based on is_ipm
             mock_type = "ipm" if is_ipm else "residia_questions"
-            return self._create_mock_response("Claude", mock_type) # type: ignore
+            # Ensure the mock response matches the expected type for the call
+            if is_ipm:
+                 return self._create_mock_response("Claude", "ipm") # type: ignore
+            else: # residia_questions
+                 return self._create_mock_response("Claude", "residia_questions") # type: ignore
+
 
         try:
             logger.info("Calling Claude API")
@@ -252,7 +276,7 @@ class AIService:
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.claude_client.messages.create,
-                    model="claude-3-opus-20240229", # specified model
+                    model="claude-3-opus-20240229",
                     max_tokens=4000,
                     temperature=0.7,
                     system=system_prompt,
@@ -265,12 +289,12 @@ class AIService:
             logger.debug(f"Claude raw response (first 1000 chars): {content[:1000]}")
 
             if is_ipm:
-                if "###PHYSICAL_START###" in content: # Check for new markers
+                if "###PHYSICAL_START###" in content:
                     return ResponseParser.parse_ipm_diagnosis(content)
                 else:
                     logger.warning("Claude response for IPM does not contain new markers, using legacy parser.")
                     return self._legacy_parse_claude_response(content)
-            else: # Residia questions
+            else:
                 return ResponseParser.parse_residia_questions(content)
 
         except asyncio.TimeoutError:
@@ -318,7 +342,11 @@ class AIService:
         if not self.openai_client:
             logger.warning("OpenAI client not available. Returning mock response.")
             mock_type = "ipm" if is_ipm else "residia_questions"
-            return self._create_mock_response("OpenAI", mock_type) # type: ignore
+            if is_ipm:
+                 return self._create_mock_response("OpenAI", "ipm") # type: ignore
+            else: # residia_questions
+                 return self._create_mock_response("OpenAI", "residia_questions") # type: ignore
+
 
         try:
             logger.info("Calling OpenAI API")
@@ -338,14 +366,13 @@ class AIService:
                 ),
                 timeout=AI_TIMEOUT
             )
-            
+
             content = response.choices[0].message.content
             if content is None:
                 logger.error("OpenAI API returned None content.")
-                # Return a typed empty response or raise, depending on strictness
                 return {} if is_ipm else [] # type: ignore
             logger.debug(f"OpenAI raw response (first 1000 chars): {content[:1000]}")
-            
+
             return ResponseParser.parse_ipm_diagnosis(content) if is_ipm else ResponseParser.parse_residia_questions(content)
 
         except asyncio.TimeoutError:
@@ -365,31 +392,26 @@ class AIService:
         if not self.gemini_model:
             logger.warning("Gemini model not available. Returning mock response.")
             mock_type = "ipm" if is_ipm else "residia_questions"
-            return self._create_mock_response("Gemini", mock_type) # type: ignore
+            if is_ipm:
+                 return self._create_mock_response("Gemini", "ipm") # type: ignore
+            else: # residia_questions
+                 return self._create_mock_response("Gemini", "residia_questions") # type: ignore
 
         try:
             logger.info("Calling Gemini API")
-            # Gemini's `generate_content` can take `system_instruction` in the model or `contents`
-            # For `gemini-1.5-flash` (and similar models), it's best to use `GenerativeModel(model_name, system_instruction=...)`
-            # or `start_chat(system_instruction=...)`.
-            # If system prompt must be dynamic per call and not using chat, combining is an option.
-            # Let's assume `self.gemini_model` is initialized without a global system_instruction.
-
             effective_prompt = f"{system_prompt}\n\n{user_prompt}"
             logger.debug(f"Gemini Combined prompt (first 200 chars): {effective_prompt[:200]}...")
 
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.gemini_model.generate_content,
-                    effective_prompt,
-                    # generation_config={"temperature": 0.7, "max_output_tokens": 4000} # Alternative way to set params
+                    effective_prompt
                 ),
                 timeout=AI_TIMEOUT
             )
 
-            # Ensure response.text is used, and handle cases where response might not have it.
             content = response.text if hasattr(response, 'text') else ''
-            if not content and response.parts: # Check parts if text is empty
+            if not content and hasattr(response, 'parts') and response.parts:
                  content = "".join(part.text for part in response.parts if hasattr(part, 'text'))
 
             if not content:
@@ -413,248 +435,236 @@ class AIService:
             logger.error(f"Gemini API unexpected error: {type(e).__name__}: {e}")
             raise
 
-    async def _fallback_to_available_ai(self, system_prompt: str, user_prompt: str, is_ipm: bool) -> Dict[str, str] | List[str]:
-        logger.info(f"Attempting fallback for {'IPM' if is_ipm else 'Residia questions'}.")
-
-        # Define preferred order
-        preferred_order = [
-            ("Claude", self.claude_client, self._generate_with_claude),
-            ("OpenAI", self.openai_client, self._generate_with_openai),
-            ("Gemini", self.gemini_model, self._generate_with_gemini),
-        ]
-
-        for name, client, method in preferred_order:
+    async def _fallback_to_available_ai(self, system_prompt: str, user_prompt: str, is_ipm: bool, preferred_order: List[str]) -> Dict[str, str] | List[str]:
+        # This method is kept for now but might be deprecated if the new generate_... methods' logic is preferred.
+        logger.info(f"Attempting fallback for {'IPM' if is_ipm else 'Residia questions'} with order: {preferred_order}")
+        model_map = {
+            "claude": (self._generate_with_claude, self.claude_client),
+            "openai": (self._generate_with_openai, self.openai_client),
+            "gemini": (self._generate_with_gemini, self.gemini_model)
+        }
+        for model_name in preferred_order:
+            if model_name not in model_map:
+                logger.warning(f"Unknown model '{model_name}' in fallback order. Skipping.")
+                continue
+            method, client = model_map[model_name]
             if client:
-                logger.info(f"Fallback: Trying {name}.")
+                logger.info(f"Fallback: Trying {model_name}.")
                 try:
-                    # Ensure 'method' is awaited as they are async
                     return await method(system_prompt, user_prompt, is_ipm)
                 except Exception as e:
-                    logger.warning(f"Fallback to {name} failed: {type(e).__name__}: {e}")
+                    logger.warning(f"Fallback to {model_name} failed: {type(e).__name__}: {e}")
             else:
-                logger.debug(f"Fallback: {name} client not available.")
-
-        logger.error("All AI fallbacks failed or no clients available.")
-        # Return a mock response of the correct type if all fallbacks fail
+                logger.debug(f"Fallback: {model_name} client not available.")
+        logger.error(f"All AI fallbacks in order {preferred_order} failed or no clients available.")
         mock_type_str = "ipm" if is_ipm else "residia_questions"
-        logger.warning(f"Returning emergency mock response for {mock_type_str} after all fallbacks failed.")
-        return self._create_mock_response("EmergencyFallback", mock_type_str) # type: ignore
+        logger.warning(f"Returning emergency mock response for {mock_type_str} from _fallback_to_available_ai.")
+        if is_ipm:
+            return self._create_mock_response("EmergencyFallbackInMethod", "ipm") # type: ignore
+        else:
+            return self._create_mock_response("EmergencyFallbackInMethod", "residia_questions") # type: ignore
+
 
     def _validate_ipm_response(self, response: Optional[Dict[str, str]]) -> bool:
         if not response:
-            logger.warning("Validation failed: Response is None.")
+            logger.warning("Validation failed: Response is None or empty.")
             return False
-
         required_keys = ["physical", "emotional", "unconscious", "counseling"]
         if not all(key in response for key in required_keys):
             logger.warning(f"Validation failed: Missing keys. Found: {list(response.keys())}, Expected: {required_keys}")
             return False
-
         filled_count = sum(1 for key in required_keys if response.get(key, "").strip())
-        # As per issue: "at least 2 sections", and "Counseling section is mandatory"
         if filled_count < 2:
             logger.warning(f"Validation failed: Insufficient content. Filled sections: {filled_count}/{len(required_keys)}")
             return False
-
         if not response.get("counseling", "").strip():
             logger.warning("Validation failed: Counseling section is empty, which is mandatory.")
             return False
-
         logger.info("IPM response validation successful.")
         return True
 
     async def generate_ipm_diagnosis(
         self,
         initial_prompt: str,
-        ai_model: Literal["claude", "openai", "gemini"] = "claude"
+        ai_model: Optional[str] = None,
+        plan_type: Optional[str] = None
     ) -> Dict[str, str]:
+        from app.config import DEFAULT_FALLBACK_ORDER
+
+        primary_model_to_use: Optional[str] = None
+        current_fallback_order: List[str] = []
+
+        if ai_model:
+            logger.info(f"Explicit AI model specified: {ai_model}. Plan-based selection will be overridden for primary choice.")
+            primary_model_to_use = ai_model
+            if ai_model in DEFAULT_FALLBACK_ORDER:
+                temp_order = [m for m in DEFAULT_FALLBACK_ORDER if m != ai_model]
+                current_fallback_order = [ai_model] + temp_order
+            else:
+                current_fallback_order = [ai_model] + [m for m in DEFAULT_FALLBACK_ORDER if m != ai_model]
+            logger.info(f"Using fallback order for explicit AI: {current_fallback_order}")
+        elif plan_type:
+            _primary, _fallback_order = self.get_ai_models_for_plan(plan_type)
+            primary_model_to_use = _primary
+            current_fallback_order = _fallback_order
+            logger.info(f"Plan-based AI selection for plan '{plan_type}'. Primary: {primary_model_to_use}, Order: {current_fallback_order}")
+        else:
+            raise ValueError("Either ai_model or plan_type must be specified for IPM diagnosis")
+
         system_prompt, user_prompt = self._create_ipm_diagnosis_prompt(initial_prompt)
-        max_retries = 2 # As per issue
-        last_error: Optional[Exception] = None # Store the actual exception object
+        last_error: Optional[Exception] = None
+        result: Optional[Dict[str, str]] = None
 
-        for attempt in range(max_retries + 1):
-            logger.info(f"Generating IPM diagnosis (AI: {ai_model}, Attempt: {attempt + 1}/{max_retries + 1})")
-            result: Optional[Dict[str, str]] = None # Ensure result is Dict or None
-
+        for model_name_in_order in current_fallback_order:
             try:
-                current_ai_method = None
-                client_available = False
+                logger.info(f"Attempting IPM diagnosis with {model_name_in_order} (Plan: {plan_type or 'N/A'}, Explicit: {ai_model or 'N/A'})")
 
-                if ai_model == "claude":
-                    current_ai_method = self._generate_with_claude
-                    client_available = bool(self.claude_client)
-                elif ai_model == "openai":
-                    current_ai_method = self._generate_with_openai
-                    client_available = bool(self.openai_client)
-                elif ai_model == "gemini":
-                    current_ai_method = self._generate_with_gemini
-                    client_available = bool(self.gemini_model)
+                if model_name_in_order == "claude" and self.claude_client:
+                    result = await self._generate_with_claude(system_prompt, user_prompt, is_ipm=True) # type: ignore
+                elif model_name_in_order == "openai" and self.openai_client:
+                    result = await self._generate_with_openai(system_prompt, user_prompt, is_ipm=True) # type: ignore
+                elif model_name_in_order == "gemini" and self.gemini_model:
+                    result = await self._generate_with_gemini(system_prompt, user_prompt, is_ipm=True) # type: ignore
                 else:
-                    logger.error(f"Invalid AI model specified: {ai_model}. Attempting general fallback.")
-                    # Fall directly to general fallback if model name is wrong
-                    result = await self._fallback_to_available_ai(system_prompt, user_prompt, is_ipm=True) # type: ignore
+                    logger.warning(f"Client for {model_name_in_order} not available or model unknown. Trying next in fallback order.")
+                    if not last_error:
+                        last_error = Exception(f"Client for {model_name_in_order} not available.")
+                    continue
 
-                if current_ai_method: # If a valid ai_model was specified
-                    if client_available:
-                        result = await current_ai_method(system_prompt, user_prompt, is_ipm=True) # type: ignore
-                    else: # Client for specified AI not available
-                        logger.warning(f"{ai_model} client not available for IPM diagnosis. Attempting specific fallback first.")
-                        result = await self._fallback_to_available_ai(system_prompt, user_prompt, is_ipm=True) # type: ignore
-
-                # Validate the result if one was obtained
                 if self._validate_ipm_response(result):
-                    logger.info("IPM diagnosis generated and validated successfully.")
-                    return result # type: ignore # result is now confirmed Dict[str, str]
+                    logger.info(f"IPM diagnosis successful with {model_name_in_order}.")
+                    return result # type: ignore
                 else:
-                    # Log warning if validation failed for a non-None result
-                    if result is not None: # result could be {} or {"physical": "", ...}
-                        logger.warning(f"IPM diagnosis response validation failed. Result: {str(result)[:300]}...")
-                    # last_error should be an Exception or string if no exception occurred but validation failed
-                    if not last_error: # Only set if not already set by an exception catcher
-                        last_error = Exception("Invalid or empty response from AI after parsing and validation.")
-
+                    logger.warning(f"Response validation failed for {model_name_in_order}. Content: {str(result)[:200]}...")
+                    last_error = Exception(f"Response validation failed for {model_name_in_order}.")
             except Exception as e:
-                logger.error(f"Error during IPM diagnosis generation (Attempt {attempt + 1}) with {ai_model}: {type(e).__name__}: {e}")
+                logger.error(f"Error during IPM diagnosis with {model_name_in_order}: {type(e).__name__} - {e}")
                 last_error = e
-                # If a specific API error or a config error (like ValueError from fallback),
-                # and it's the last attempt, we might not want to just raise.
-                # The original spec implies raising the last error.
 
-            # Retry logic
-            if attempt < max_retries:
-                sleep_duration = 2 ** attempt
-                logger.info(f"Retrying IPM diagnosis generation in {sleep_duration} seconds...")
-                await asyncio.sleep(sleep_duration)
-            elif attempt == max_retries and not self._validate_ipm_response(result): # Last attempt and still not valid
-                 logger.warning(f"Final attempt for IPM diagnosis with {ai_model} failed validation. Trying general fallback if not already done.")
-                 try:
-                     # Ensure we are not in an infinite loop if _fallback_to_available_ai was already the source of 'result'
-                     # This check is tricky. Assume _fallback_to_available_ai was tried if client_available was false.
-                     if client_available : # Only try general fallback if the chosen AI was initially available but failed
-                        result = await self._fallback_to_available_ai(system_prompt, user_prompt, is_ipm=True) # type: ignore
-                        if self._validate_ipm_response(result):
-                            logger.info("IPM diagnosis successfully generated via final fallback.")
-                            return result # type: ignore
-                        else:
-                            if result is not None:
-                                logger.warning(f"Final fallback for IPM diagnosis also failed validation. Result: {str(result)[:300]}...")
-                            if not last_error: # If previous attempts didn't set an exception
-                                last_error = Exception("Final fallback response for IPM was also invalid.")
-                 except Exception as fallback_e:
-                     logger.error(f"Exception during final fallback for IPM: {fallback_e}")
-                     last_error = fallback_e
-
-
-        logger.error(f"Failed to generate IPM diagnosis after all attempts and fallbacks. Last error: {last_error}")
+        logger.error(f"All AI models in fallback order {current_fallback_order} failed to provide a valid IPM diagnosis. Last error: {last_error}")
         if isinstance(last_error, Exception):
             raise last_error
-        else: # Should ideally always be an exception, but as a safeguard:
-            raise Exception(f"IPM diagnosis generation failed with an unknown error or persistent validation failure: {last_error}")
-
+        elif last_error is not None:
+             raise Exception(str(last_error))
+        else:
+            raise Exception("IPM diagnosis failed for an unknown reason after trying all fallbacks.")
 
     async def generate_residia_questions(
         self,
         session_data: Dict[str, any],
-        ai_model: Literal["claude", "openai", "gemini"] = "claude"
+        ai_model: Optional[str] = None,
+        plan_type: Optional[str] = None
     ) -> List[str]:
+        from app.config import DEFAULT_FALLBACK_ORDER
+
+        primary_model_to_use: Optional[str] = None
+        current_fallback_order: List[str] = []
+
+        if ai_model:
+            logger.info(f"Explicit AI model specified for Residia questions: {ai_model}.")
+            primary_model_to_use = ai_model
+            if ai_model in DEFAULT_FALLBACK_ORDER:
+                temp_order = [m for m in DEFAULT_FALLBACK_ORDER if m != ai_model]
+                current_fallback_order = [ai_model] + temp_order
+            else:
+                current_fallback_order = [ai_model] + [m for m in DEFAULT_FALLBACK_ORDER if m != ai_model]
+            logger.info(f"Using fallback order for explicit AI (Residia): {current_fallback_order}")
+        elif plan_type:
+            _primary, _fallback_order = self.get_ai_models_for_plan(plan_type)
+            primary_model_to_use = _primary
+            current_fallback_order = _fallback_order
+            logger.info(f"Plan-based AI for Residia questions (Plan '{plan_type}'). Primary: {primary_model_to_use}, Order: {current_fallback_order}")
+        else:
+            raise ValueError("Either ai_model or plan_type must be specified for Residia questions")
+
         system_prompt, user_prompt = self._create_residia_questions_prompt(session_data)
-        max_retries = 1 # Per issue, less critical for complex retries
         last_error: Optional[Exception] = None
+        questions: Optional[List[str]] = None
 
-        for attempt in range(max_retries + 1):
-            logger.info(f"Generating Residia questions (AI: {ai_model}, Attempt: {attempt + 1}/{max_retries + 1})")
-            questions: Optional[List[str]] = None
-
+        for model_name_in_order in current_fallback_order:
             try:
-                current_ai_method = None
-                client_available = False
-
-                if ai_model == "claude":
-                    current_ai_method = self._generate_with_claude
-                    client_available = bool(self.claude_client)
-                elif ai_model == "openai":
-                    current_ai_method = self._generate_with_openai
-                    client_available = bool(self.openai_client)
-                elif ai_model == "gemini":
-                    current_ai_method = self._generate_with_gemini
-                    client_available = bool(self.gemini_model)
+                logger.info(f"Attempting Residia questions with {model_name_in_order} (Plan: {plan_type or 'N/A'}, Explicit: {ai_model or 'N/A'})")
+                if model_name_in_order == "claude" and self.claude_client:
+                    questions = await self._generate_with_claude(system_prompt, user_prompt, is_ipm=False) # type: ignore
+                elif model_name_in_order == "openai" and self.openai_client:
+                    questions = await self._generate_with_openai(system_prompt, user_prompt, is_ipm=False) # type: ignore
+                elif model_name_in_order == "gemini" and self.gemini_model:
+                    questions = await self._generate_with_gemini(system_prompt, user_prompt, is_ipm=False) # type: ignore
                 else:
-                    logger.error(f"Invalid AI model for Residia questions: {ai_model}. Attempting fallback.")
-                    questions = await self._fallback_to_available_ai(system_prompt, user_prompt, is_ipm=False) # type: ignore
+                    logger.warning(f"Client for {model_name_in_order} (Residia questions) not available or model unknown.")
+                    if not last_error: last_error = Exception(f"Client for {model_name_in_order} not available.")
+                    continue
 
-                if current_ai_method:
-                    if client_available:
-                        questions = await current_ai_method(system_prompt, user_prompt, is_ipm=False) # type: ignore
-                    else:
-                        logger.warning(f"{ai_model} client not available for Residia questions. Attempting fallback.")
-                        questions = await self._fallback_to_available_ai(system_prompt, user_prompt, is_ipm=False) # type: ignore
-
-                # Validate questions
-                if questions and len(questions) >= 3: # Expect at least 3 questions
-                    logger.info(f"Residia questions generated successfully (count: {len(questions)}).")
-                    return questions[:5] # Return up to 5
+                if questions and len(questions) >= 3: # Basic validation for questions
+                    logger.info(f"Residia questions successful with {model_name_in_order} (Count: {len(questions)}).")
+                    return questions[:5]
                 else:
-                    logger.warning(f"Residia questions generation resulted in too few questions or None. Count: {len(questions) if questions else 'None'}.")
-                    if not last_error:
-                        last_error = Exception("Insufficient or no questions generated by AI.")
-
+                    logger.warning(f"Insufficient questions from {model_name_in_order} for Residia. Count: {len(questions) if questions else 'None'}.")
+                    last_error = Exception(f"Insufficient questions from {model_name_in_order}.")
             except Exception as e:
-                logger.error(f"Error generating Residia questions (Attempt {attempt + 1}) with {ai_model}: {type(e).__name__}: {e}")
+                logger.error(f"Error with {model_name_in_order} for Residia questions: {type(e).__name__} - {e}")
                 last_error = e
 
-            if attempt < max_retries:
-                await asyncio.sleep(1) # Shorter sleep for question retries
-            elif attempt == max_retries and not (questions and len(questions) >=3): # Final attempt failed
-                logger.warning(f"Final attempt for Residia questions with {ai_model} failed. Trying general fallback if not already done.")
-                try:
-                    if client_available : # Only try general fallback if the chosen AI was initially available but failed
-                        questions = await self._fallback_to_available_ai(system_prompt, user_prompt, is_ipm=False) # type: ignore
-                        if questions and len(questions) >= 3:
-                            logger.info(f"Residia questions successfully generated via final fallback (count: {len(questions)}).")
-                            return questions[:5]
-                        else:
-                            logger.warning(f"Final fallback for Residia questions also failed to produce enough questions. Count: {len(questions) if questions else 'None'}")
-                            if not last_error:
-                                last_error = Exception("Final fallback for Residia questions also invalid.")
-                except Exception as fallback_e:
-                     logger.error(f"Exception during final fallback for Residia questions: {fallback_e}")
-                     last_error = fallback_e
+        logger.error(f"All AI models for Residia questions failed. Last error: {last_error}. Order: {current_fallback_order}")
+        # Fallback to mock as per original generate_residia_questions if all else fails
+        if self._create_mock_response: # Check if method exists, defensive
+             return self._create_mock_response("CriticalFallbackMock", "residia_questions") # type: ignore
+        raise last_error if isinstance(last_error, Exception) else Exception("Residia questions failed.")
 
 
-        logger.error(f"Failed to generate Residia questions after all attempts. Last error: {last_error}. Returning mock questions.")
-        # Per issue, fallback to mock if all else fails for questions.
-        return self._create_mock_response("CriticalFallbackMock", "residia_questions") # type: ignore
-
-    # Placeholder for analyze_residia which is not part of this refactoring issue
-    # This method was present in the original file, so keeping its structure.
     async def analyze_residia(
         self,
-        session_data: Dict[str, any], # type: ignore
-        user_answers: List[Dict[str, str]], # type: ignore
-        identified_types: List[str], # type: ignore
-        ai_model: Literal["claude", "openai", "gemini"] = "claude" # type: ignore
+        session_data: Dict[str, any],
+        user_answers: List[Dict[str, str]],
+        identified_types: List[str],
+        ai_model: Optional[str] = None,
+        plan_type: Optional[str] = None
     ) -> str:
-        logger.warning("analyze_residia method is a placeholder and not fully refactored in this task.")
-        # This method would also use system_prompt, user_prompt, and call appropriate _generate_with_X
-        # It should also have its own prompt creation, response parsing, and validation logic.
-        # For now, returning a simple mock. This is outside the scope of the current issue.
-        # from app.file_manager import get_file_content_for_ai # Assuming this import exists
-        # residia_files = get_file_content_for_ai("residia") # Example: this would be part of its logic
+        from app.config import DEFAULT_FALLBACK_ORDER # Import for explicit ai_model case
+        logger.info(f"analyze_residia called. Plan: {plan_type}, Explicit AI: {ai_model}")
 
-        # Mocking a system and user prompt creation (very basic)
-        _system_prompt = f"Analyze Residia for types: {', '.join(identified_types)} based on provided data."
+        primary_model_to_use: Optional[str] = None
+        current_fallback_order: List[str] = []
+
+        if ai_model:
+            logger.info(f"Explicit AI model specified for Residia analysis: {ai_model}.")
+            primary_model_to_use = ai_model
+            if ai_model in DEFAULT_FALLBACK_ORDER:
+                temp_order = [m for m in DEFAULT_FALLBACK_ORDER if m != ai_model]
+                current_fallback_order = [ai_model] + temp_order
+            else:
+                current_fallback_order = [ai_model] + [m for m in DEFAULT_FALLBACK_ORDER if m != ai_model]
+        elif plan_type:
+            _primary, _fallback_order = self.get_ai_models_for_plan(plan_type)
+            primary_model_to_use = _primary
+            current_fallback_order = _fallback_order
+        else:
+            # Defaulting to a standard fallback if no plan or model specified, though router should provide plan.
+            logger.warning("Neither plan_type nor ai_model specified for analyze_residia. Using default fallback.")
+            primary_model_to_use = DEFAULT_FALLBACK_ORDER[0]
+            current_fallback_order = DEFAULT_FALLBACK_ORDER
+            # Alternatively, raise ValueError("Either ai_model or plan_type must be provided for Residia analysis.")
+
+        logger.info(f"Residia Analysis - Primary: {primary_model_to_use}, Order: {current_fallback_order}")
+
+        # This method's core logic is largely a placeholder.
+        # The AI call part would be similar to other generate_ methods if it were generating complex text.
+        # For now, it just returns a mock string. We'll include the chosen model in the mock.
+
+        # Placeholder for creating system/user prompts for residia analysis
+        _system_prompt = f"Analyze Residia for types: {', '.join(identified_types)} based on provided data. Use {primary_model_to_use} logic."
         _user_prompt = f"Session: {session_data.get('initial_prompt', '')}. Answers: {user_answers}. Analyze."
 
-        # Mock calling an AI - This is highly simplified
-        if ai_model == "claude" and self.claude_client:
-            # return await self._generate_with_claude(_system_prompt, _user_prompt, is_ipm=False) # This would need a new 'is_ipm' type
-            pass # This would be a call to a specific residia analysis generation method
-        # ... other AI models
+        # Mocked AI call attempt - in a real scenario, this would loop through current_fallback_order
+        chosen_model_for_mock = primary_model_to_use or current_fallback_order[0]
 
-        return f"Mock analysis for {ai_model} based on identified types: {', '.join(identified_types)}. User prompt: {session_data.get('initial_prompt', '')}. This function needs full implementation."
+        logger.warning(f"analyze_residia is using mock logic. Chosen AI for mock: {chosen_model_for_mock}")
+        # Simulating that it would try chosen_model_for_mock
+        # In a full implementation, you'd loop through `current_fallback_order` and call appropriate
+        # _generate_with_X method, which would then need a new `is_ipm` type or a dedicated method.
+        # For example, `await self._generate_residia_analysis_content(system_prompt, user_prompt, model_to_use)`
 
-# Singleton instance:
-# Depending on application structure (e.g., FastAPI), dependency injection might be used instead.
-# For now, as per original structure, a direct instance can be created if needed elsewhere.
-# However, it's often better to instantiate it where used or use a factory/DI.
+        return f"Mock analysis for plan '{plan_type}' (tried {chosen_model_for_mock} first based on logic) for types: {', '.join(identified_types)}. User prompt: {session_data.get('initial_prompt', '')}. This function's core generation logic needs full implementation."
+
 ai_service = AIService()
+```
