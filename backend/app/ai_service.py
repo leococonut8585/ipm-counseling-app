@@ -74,8 +74,7 @@ class ResponseParser:
         # Try keyword-based extraction (simplified)
         # This fallback is basic and might need more sophisticated logic depending on actual legacy formats
         for keyword in keywords.get(section_type, []):
-            # Attempt to find "Keyword:[ ]Content" or "Keyword
-Content"
+            # Attempt to find "Keyword:[ ]Content" or "Keyword\nContent"
             # This regex is an example and may need refinement
             pattern = rf'{re.escape(keyword)}.*?(?:[:：]|\n)\s*(.*?)(?=\n\n|\n(?:###[A-Z_]+_START###|1\.|2\.|3\.|4\.)|$)'
             match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
