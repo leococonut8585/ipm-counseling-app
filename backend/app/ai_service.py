@@ -211,11 +211,10 @@ class AIService:
     def _create_mock_residia_analysis(self, identified_types: List[str]) -> str:
         logger.info(f"Creating mock Residia analysis for types: {identified_types}")
         analysis = f"""【レジディア分析レポート】 特定されたレジディアタイプ：{', '.join(identified_types) if identified_types else "タイプ特定なし"} ... (detailed analysis) ..."""
-        # Ensure mock is at least 3000 chars
         base_len = len(analysis)
         repetitions = (3000 // base_len) + 1 if base_len > 0 else 200
         final_analysis = (analysis + "\n\n") * repetitions
-        return final_analysis[:6000] # Truncate to max 6000
+        return final_analysis[:6000]
 
     async def _generate_with_claude(self, system_prompt: str, user_prompt: str) -> str:
         if not self.claude_client: raise ConnectionError("Claude client not available.")
@@ -331,7 +330,6 @@ class AIService:
             logger.warning("Residia Questions: Neither ai_model nor plan_type specified. Using default Claude.")
             chosen_ai_model = "claude"
             current_fallback_order = ["claude", "openai", "gemini"]
-            # Consider: raise ValueError("Either ai_model or plan_type must be provided for Residia questions")
 
         system_prompt, user_prompt = self._create_residia_questions_prompt(session_data)
         last_error: Optional[Exception] = None
@@ -404,7 +402,7 @@ class AIService:
 
         system_prompt, user_prompt = self._create_residia_analysis_prompt(session_data, user_answers, identified_types)
         last_error: Optional[Exception] = None
-        analysis_result: str = "" # Store the last valid (even if too short) content
+        analysis_result: str = ""
 
         for attempt, model_name_in_order in enumerate(current_fallback_order):
             try:
@@ -418,7 +416,7 @@ class AIService:
                     if not last_error: last_error = Exception(f"Client for {model_name_in_order} not available.")
                     continue
 
-                analysis_result = content # Store current content
+                analysis_result = content
                 if 3000 <= len(analysis_result) <= 6000:
                     logger.info(f"Residia analysis successful with {model_name_in_order} ({len(analysis_result)} chars).")
                     return analysis_result
@@ -440,15 +438,7 @@ class AIService:
                 if attempt < len(current_fallback_order) - 1:
                     await asyncio.sleep(2 ** attempt)
 
-        # If loop finishes, all models failed to produce a satisfactory response
         logger.error(f"All AI models in fallback order {current_fallback_order} failed to provide a valid Residia analysis. Last error: {last_error}.")
-
-        # If there was some content from the last attempt, even if too short, consider using it as a last resort
-        # instead of always returning a generic mock, depending on requirements.
-        # The current logic implies returning mock if no model produced a *valid length* response.
-        # If the very last attempt produced *some* content but it was too short, we might still prefer it over a generic mock.
-        # However, the prompt suggests mock if all attempts fail (including length validation).
         return self._create_mock_residia_analysis(identified_types)
 
 ai_service = AIService()
-```
