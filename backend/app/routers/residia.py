@@ -246,4 +246,4 @@ async def get_residia_analysis(
         ai_response=analysis.ai_response, analysis_count=analysis.analysis_count,
         can_continue=analysis.analysis_count < max_analysis_count, created_at=analysis.created_at
     )
-```
+    
